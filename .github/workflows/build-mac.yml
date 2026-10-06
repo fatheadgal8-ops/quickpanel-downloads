@@ -16,9 +16,6 @@ permissions:
 jobs:
   build:
     runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: quickpanel-desktop
     steps:
       - uses: actions/checkout@v4
 
@@ -26,13 +23,34 @@ jobs:
         with:
           node-version: 22
 
+      - name: Find the app folder
+        run: |
+          set -euo pipefail
+          FILE=$(find . -maxdepth 3 -name package.json -not -path "*/node_modules/*" -exec grep -l '"productName": "QuickPanel"' {} + | head -n 1 || true)
+          if [ -z "$FILE" ]; then
+            echo "Could not find the QuickPanel app files in this repository. Here is what is in it:"
+            ls -la
+            find . -maxdepth 3 -not -path "./.git/*" | head -60
+            exit 1
+          fi
+          DIR=$(dirname "$FILE")
+          echo "App folder: $DIR"
+          echo "APP_DIR=$DIR" >> "$GITHUB_ENV"
+
       - name: Install
+        working-directory: ${{ env.APP_DIR }}
         run: npm ci
 
+      - name: Prepare (signing happens once, on the finished app)
+        working-directory: ${{ env.APP_DIR }}
+        run: printf 'exports.default = async function () {};\n' > scripts/after-pack.js
+
       - name: Build the app (works on both Apple Silicon and Intel Macs)
-        run: npx electron-builder --mac --universal --dir
+        working-directory: ${{ env.APP_DIR }}
+        run: npx electron-builder --mac --universal --dir --publish never
 
       - name: Check, sign and package
+        working-directory: ${{ env.APP_DIR }}
         run: |
           set -euo pipefail
           APP=$(find dist -maxdepth 2 -type d -name "QuickPanel.app" | grep -v temp | head -n 1 || true)
@@ -59,9 +77,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: QuickPanel-mac
-          path: quickpanel-desktop/QuickPanel.dmg
+          path: ${{ env.APP_DIR }}/QuickPanel.dmg
 
       - name: Attach to the release
+        working-directory: ${{ env.APP_DIR }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ inputs.tag }}" QuickPanel.dmg --clobber --repo "${{ github.repository }}"
