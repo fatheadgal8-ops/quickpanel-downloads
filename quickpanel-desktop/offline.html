@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QuickPanel — Can't connect</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:#0a0d14;color:#cbd5e1;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;display:flex;align-items:center;justify-content:center;
+    background-image:radial-gradient(ellipse 60% 45% at 50% 0%,rgba(37,99,235,.18),transparent 70%)}
+  .card{width:min(440px,90vw);background:#0f1320;border:1px solid #1e2536;border-radius:14px;padding:2.2rem 2rem;text-align:center;position:relative;overflow:hidden}
+  .card::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#2563eb,#00d4ff,transparent)}
+  .logo{font-weight:800;letter-spacing:.14em;font-size:1.05rem;color:#f1f5f9;margin-bottom:1.4rem}
+  .logo span{color:#00d4ff}
+  .icon{font-size:2.4rem;margin-bottom:.8rem}
+  h1{font-size:1.15rem;color:#f1f5f9;margin-bottom:.5rem}
+  p{font-size:.85rem;line-height:1.6;color:#7c8aa5}
+  .reason{margin-top:.9rem;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.7rem;color:#475569;word-break:break-all}
+  .row{margin-top:1.4rem;display:flex;align-items:center;justify-content:center;gap:.8rem}
+  button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:.62rem 1.3rem;font-size:.85rem;font-weight:600;cursor:pointer}
+  button:hover{background:#1d4fc4}
+  button:disabled{opacity:.6;cursor:default}
+  .count{font-size:.75rem;color:#64748b;font-variant-numeric:tabular-nums}
+  .edit-link{display:inline-block;margin-top:1.1rem;font-size:.75rem;color:#64748b;text-decoration:underline;text-underline-offset:3px}
+  .edit-link:hover{color:#00d4ff}
+  .edit-box{margin-top:1.1rem;text-align:left}
+  .edit-box label{display:block;font-size:.7rem;color:#64748b;margin-bottom:.35rem}
+  .edit-box input{width:100%;background:#0a0d14;border:1px solid #242e4c;border-radius:8px;color:#f1f5f9;padding:.6rem .7rem;font-size:.82rem;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .edit-box input:focus{outline:none;border-color:#2563eb}
+  .edit-row{display:flex;gap:.6rem;margin-top:.7rem}
+  button.ghost{background:transparent;border:1px solid #242e4c;color:#94a3b8}
+  button.ghost:hover{background:#111830}
+  .edit-msg{margin-top:.6rem;font-size:.75rem;min-height:1em;color:#fb7185}
+  .edit-msg.ok{color:#34d399}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid #334155;border-top-color:#00d4ff;border-radius:50%;animation:s .8s linear infinite;vertical-align:-2px;margin-right:.45rem}
+  @keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">QUICK<span>PANEL</span></div>
+    <div class="icon">📡</div>
+    <h1>Can't reach QuickPanel</h1>
+    <p>Check your internet connection. The app will reconnect on its own as soon as the dashboard is reachable again.</p>
+    <div class="reason" id="reason"></div>
+    <div class="row">
+      <button id="retry">Try again now</button>
+      <span class="count" id="count"></span>
+    </div>
+    <a href="#" id="editLink" class="edit-link" style="display:none">Wrong address? Change it</a>
+    <div id="editBox" class="edit-box" style="display:none">
+      <label for="urlInput">QuickPanel address</label>
+      <input id="urlInput" type="url" placeholder="https://your-quickpanel-site.com" autocomplete="off" spellcheck="false">
+      <div class="edit-row"><button id="saveUrl">Save &amp; restart</button><button id="cancelEdit" class="ghost">Cancel</button></div>
+      <div id="editMsg" class="edit-msg"></div>
+    </div>
+  </div>
+<script>
+  const q = new URLSearchParams(location.search);
+  let target = q.get('target') || '';
+  if (!/^https?:\/\//i.test(target)) target = '';
+  const reason = (q.get('reason') || '').replace(/^net::/, '');
+  if (reason) document.getElementById('reason').textContent = reason;
+
+  const RETRY_EVERY = 8;
+  let left = RETRY_EVERY, busy = false, editing = false;
+  const countEl = document.getElementById('count'), btn = document.getElementById('retry');
+
+  async function attempt() {
+    if (busy || editing || !target) return;
+    busy = true; btn.disabled = true;
+    countEl.innerHTML = '<span class="spin"></span>Connecting…';
+    try {
+      // "no-cors" still rejects when the network/host is unreachable, and resolves when the server answers at all.
+      await fetch(target + '/api/stats', { cache: 'no-store', mode: 'no-cors' });
+      location.href = target;
+      return;
+    } catch (_) { /* still offline */ }
+    busy = false; btn.disabled = false; left = RETRY_EVERY; tick();
+  }
+  function tick() { if (!busy) countEl.textContent = 'Retrying in ' + left + 's'; }
+  btn.addEventListener('click', attempt);
+  setInterval(() => { if (busy || editing) return; left -= 1; if (left <= 0) attempt(); else tick(); }, 1000);
+  tick();
+
+  // ── change the site address (desktop app only) ──
+  const canEdit = !!(window.qpDesktop && window.qpDesktop.setSiteUrl);
+  const editLink = document.getElementById('editLink'), editBox = document.getElementById('editBox');
+  const urlInput = document.getElementById('urlInput'), editMsg = document.getElementById('editMsg');
+  function openEdit() {
+    editing = true; countEl.textContent = ''; editLink.style.display = 'none'; editBox.style.display = 'block';
+    urlInput.value = target; urlInput.focus(); urlInput.select();
+  }
+  function closeEdit() { editing = false; editBox.style.display = 'none'; editLink.style.display = 'inline-block'; editMsg.textContent = ''; left = RETRY_EVERY; tick(); }
+  if (canEdit) {
+    editLink.style.display = 'inline-block';
+    editLink.addEventListener('click', e => { e.preventDefault(); openEdit(); });
+    document.getElementById('cancelEdit').addEventListener('click', closeEdit);
+    document.getElementById('saveUrl').addEventListener('click', async () => {
+      editMsg.className = 'edit-msg'; editMsg.textContent = '';
+      const r = await window.qpDesktop.setSiteUrl(urlInput.value);
+      if (r && r.ok) { editMsg.className = 'edit-msg ok'; editMsg.textContent = 'Saved — restarting QuickPanel…'; }
+      else editMsg.textContent = (r && r.error) || "Couldn't save that address.";
+    });
+    urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('saveUrl').click(); });
+    if (q.get('edit') === '1') openEdit();
+  }
+</script>
+</body>
+</html>

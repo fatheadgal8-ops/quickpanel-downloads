@@ -1,0 +1,82 @@
+{
+  "name": "quickpanel-desktop",
+  "productName": "QuickPanel",
+  "version": "1.0.0",
+  "description": "QuickPanel Dashboard desktop app",
+  "main": "main.js",
+  "author": "QuickPanel",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "set-url": "node scripts/set-url.js",
+    "dist:win": "electron-builder --win --x64",
+    "dist:mac": "electron-builder --mac --universal"
+  },
+  "build": {
+    "appId": "com.quickpanel.dashboard",
+    "productName": "QuickPanel",
+    "copyright": "QuickPanel Dashboard",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "offline.html",
+      "app-config.json",
+      "build/window-icon.png",
+      "package.json"
+    ],
+    "afterPack": "scripts/after-pack.js",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "QuickPanel",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "QuickPanel-Setup.exe",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
+        }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "artifactName": "QuickPanel.${ext}"
+    },
+    "dmg": {
+      "title": "QuickPanel",
+      "icon": "build/icon.icns"
+    }
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "resedit": "3.1.0"
+  }
+}
