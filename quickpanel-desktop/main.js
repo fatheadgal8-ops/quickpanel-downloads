@@ -5,9 +5,10 @@
  * the real work, so site updates show up here automatically -- this shell
  * only handles the window, links, the offline screen and a few app niceties.
  */
-const { app, BrowserWindow, Menu, shell, screen, session, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, Notification, globalShortcut, desktopCapturer, dialog, systemPreferences, nativeImage, shell, screen, session, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 // ── Which website this app opens ───────────────────────────────────────────
 // Priority: QUICKPANEL_URL env var  >  <user data>/config.json  >  app-config.json
@@ -99,6 +100,170 @@ function saveWindowState(win) {
 // ── Window ─────────────────────────────────────────────────────────────────
 let mainWindow = null;
 
+// ── Clips: record Roblox, press a key, get a named link ────────────────────
+// Only the Roblox window is recorded, and only while clip recording is turned on. Nothing leaves the PC until you press the key.
+const CLIP_KEY = 'CommandOrControl+Shift+C';
+const CLIP_KEY_TEXT = process.platform === 'darwin' ? 'Cmd+Shift+C' : 'Ctrl+Shift+C';
+const clipSettingsFile = () => path.join(app.getPath('userData'), 'clip-settings.json');
+const clip = Object.assign({ enabled: false, sound: true, consented: false }, readJson(clipSettingsFile()));
+function saveClipSettings() { try { fs.writeFileSync(clipSettingsFile(), JSON.stringify(clip)); } catch (_) { /* non-fatal */ } }
+
+let recWin = null, recState = 'idle', recStarting = false, tray = null, pollTimer = null;
+let quitting = false;
+
+function notify(title, body, onClick) {
+  try {
+    if (!Notification.isSupported()) return;
+    const n = new Notification({ title, body, silent: true });
+    if (onClick) n.on('click', onClick);
+    n.show();
+  } catch (_) { /* non-fatal */ }
+}
+function findRoblox() {
+  return desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 } })
+    .then((list) => list.find((s) => /^roblox$/i.test((s.name || '').trim())) || null)
+    .catch(() => null);
+}
+function ensureRecWin() {
+  if (recWin && !recWin.isDestroyed()) return recWin;
+  const ses = session.fromPartition('qp-recorder');
+  ses.setPermissionRequestHandler((_wc, permission, cb) => cb(permission === 'media' || permission === 'display-capture'));
+  ses.setDisplayMediaRequestHandler(async (_req, cb) => {
+    const src = await findRoblox();
+    if (!src) return cb({});
+    const r = { video: src };
+    if (clip.sound && process.platform === 'win32') r.audio = 'loopback';
+    cb(r);
+  });
+  recWin = new BrowserWindow({
+    show: false, width: 320, height: 240, skipTaskbar: true,
+    webPreferences: { preload: path.join(__dirname, 'recorder-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false, partition: 'qp-recorder' },
+  });
+  recWin.loadFile(path.join(__dirname, 'recorder.html'));
+  recWin.on('closed', () => { recWin = null; recState = 'idle'; updateTray(); });
+  return recWin;
+}
+async function recStart() {
+  if (recStarting || recState === 'recording') return;
+  recStarting = true;
+  try {
+    if (process.platform === 'darwin' && systemPreferences.getMediaAccessStatus('screen') === 'denied') {
+      notify('Allow screen recording', 'Open System Settings, Privacy & Security, Screen Recording, turn on QuickPanel, then restart the app.');
+      return;
+    }
+    const w = ensureRecWin();
+    if (w.webContents.isLoading()) await new Promise((r) => w.webContents.once('did-finish-load', r));
+    // The "true" counts as a user gesture, which the browser requires before it will start a screen capture.
+    await w.webContents.executeJavaScript('qpStart(' + (clip.sound && process.platform === 'win32' ? 'true' : 'false') + ')', true);
+  } catch (_) { /* reported through qp:rec-status */ }
+  finally { recStarting = false; }
+}
+function recStop() {
+  if (recWin && !recWin.isDestroyed()) recWin.webContents.executeJavaScript('qpStop()').catch(() => {});
+  recState = 'idle'; updateTray();
+}
+async function pollRoblox() {
+  if (!clip.enabled) { if (recState === 'recording') recStop(); return; }
+  const src = await findRoblox();
+  if (src && recState !== 'recording' && !recStarting) recStart();
+  else if (!src && recState === 'recording') recStop();
+}
+ipcMain.on('qp:rec-status', (event, status) => {
+  if (!recWin || event.sender !== recWin.webContents) return;
+  if (status === 'recording') { recState = 'recording'; updateTray(); return; }
+  if (status === 'ended') { recState = 'idle'; updateTray(); return; }
+  if (status === 'saving') return;
+  const msgs = {
+    toosoon: ['Keep playing a little longer', 'Recording just started. Try again in a few seconds.'],
+    empty: ["Nothing to save yet", 'Try again in a few seconds.'],
+    toobig: ['That clip is too big', 'Lower your game resolution and try again.'],
+  };
+  if (msgs[status]) notify(msgs[status][0], msgs[status][1]);
+  else if (status.startsWith('error')) { recState = 'idle'; updateTray(); notify("Couldn't record", 'QuickPanel could not capture the Roblox window. Make sure Roblox is open, then try again.'); }
+});
+function onClipKey() {
+  if (!clip.enabled) { notify('Clip recording is off', 'Turn it on from the QuickPanel tray icon or the Clips menu.'); return; }
+  if (recState !== 'recording' || !recWin) { notify('Roblox not detected', 'Open Roblox, wait a moment, then press ' + CLIP_KEY_TEXT + ' again.'); return; }
+  recWin.webContents.send('qp:rec-save');
+}
+ipcMain.handle('qp:clip-data', async (event, buf, meta) => {
+  if (!recWin || event.sender !== recWin.webContents) return { ok: false };
+  const ext = /mp4/.test(String(meta && meta.type)) ? '.mp4' : '.webm';
+  const dir = path.join(app.getPath('userData'), 'clips');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) { /* ignore */ }
+  const file = path.join(dir, 'clip-' + Date.now() + ext);
+  try { fs.writeFileSync(file, Buffer.from(buf)); } catch (_) { notify("Couldn't save the clip", 'Your disk may be full.'); return { ok: false }; }
+  uploadClip(file, ext, Math.max(0, Math.min(Number(meta && meta.seconds) || 0, 300)));
+  return { ok: true };
+});
+async function uploadClip(file, ext, seconds) {
+  notify('Saving your clip…', 'Sending it to QuickPanel.');
+  const keep = () => shell.showItemInFolder(file);
+  try {
+    const data = fs.readFileSync(file);
+    const b = '----qp' + crypto.randomBytes(12).toString('hex');
+    const parts = [];
+    const field = (n, v) => parts.push(Buffer.from('--' + b + '\r\nContent-Disposition: form-data; name="' + n + '"\r\n\r\n' + v + '\r\n'));
+    field('source', 'desktop'); field('duration', String(seconds)); field('game', 'Roblox');
+    parts.push(Buffer.from('--' + b + '\r\nContent-Disposition: form-data; name="clip"; filename="clip' + ext + '"\r\nContent-Type: ' + (ext === '.mp4' ? 'video/mp4' : 'video/webm') + '\r\n\r\n'), data, Buffer.from('\r\n--' + b + '--\r\n'));
+    // Uses the same sign-in as the app window, so there is nothing extra to log into.
+    const res = await session.defaultSession.fetch(SITE_URL + '/api/clips/upload', {
+      method: 'POST', credentials: 'include', redirect: 'manual',
+      headers: { 'Content-Type': 'multipart/form-data; boundary=' + b }, body: Buffer.concat(parts),
+    });
+    let j = null;
+    try { if (((res.headers.get('content-type')) || '').includes('json')) j = await res.json(); } catch (_) { /* not json */ }
+    if (j && j.ok) { fs.unlink(file, () => {}); notify('🎬 Clip saved', 'Click to name it and get a share link.', () => openPath('/clips?new=' + encodeURIComponent(j.clip.id))); return; }
+    if (!j) { notify('Sign in to save clips', 'Sign in to QuickPanel, then clip again. This one is saved on your PC.', keep); return; }
+    notify("Couldn't save the clip", (j.message || 'Try again.') + ' It is saved on your PC.', keep);
+  } catch (_) { notify("Couldn't upload the clip", 'Check your connection. It is saved on your PC.', keep); }
+}
+function pruneOldClips() {
+  try {
+    const dir = path.join(app.getPath('userData'), 'clips'), cutoff = Date.now() - 14 * 86400000;
+    for (const f of fs.readdirSync(dir)) { const p = path.join(dir, f); if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p); }
+  } catch (_) { /* nothing to prune */ }
+}
+async function setClipEnabled(on) {
+  if (on && !clip.consented) {
+    const r = await dialog.showMessageBox({
+      type: 'info', buttons: ['Turn on', 'Cancel'], defaultId: 0, cancelId: 1, title: 'Record clips', message: 'Turn on clip recording?',
+      detail: 'QuickPanel records only the Roblox window, and only while Roblox is open. It keeps about the last 45 seconds on your PC and uploads nothing until you press ' + CLIP_KEY_TEXT + '. ' +
+        (process.platform === 'win32' ? 'Your computer\'s sound (including voice chat) is included unless you turn off "Record game sound" in the Clips menu.' : 'Sound is not recorded on this system.'),
+    });
+    if (r.response !== 0) { buildMenu(); updateTray(); return; }
+    clip.consented = true;
+  }
+  clip.enabled = !!on; saveClipSettings(); buildMenu(); updateTray();
+  if (on) pollRoblox(); else recStop();
+}
+function setClipSound(on) { clip.sound = !!on; saveClipSettings(); if (recState === 'recording') { recStop(); setTimeout(pollRoblox, 600); } buildMenu(); updateTray(); }
+function openPath(p) {
+  if (!mainWindow || mainWindow.isDestroyed()) { createWindow(p); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show(); mainWindow.focus(); mainWindow.loadURL(SITE_URL + p);
+}
+function updateTray() {
+  if (!tray) return;
+  const status = !clip.enabled ? 'Clip recording is off' : recState === 'recording' ? 'Recording Roblox · ' + CLIP_KEY_TEXT + ' saves a clip' : 'Waiting for Roblox to open';
+  tray.setToolTip('QuickPanel · ' + status);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: status, enabled: false }, { type: 'separator' },
+    { label: 'Record clips (only while Roblox is open)', type: 'checkbox', checked: clip.enabled, click: (i) => setClipEnabled(i.checked) },
+    { label: 'Save a clip now (' + CLIP_KEY_TEXT + ')', enabled: recState === 'recording', click: onClipKey },
+    { label: 'My clips', click: () => openPath('/clips') },
+    { label: 'Open QuickPanel', click: () => openPath('') },
+    { type: 'separator' }, { label: 'Quit QuickPanel', click: () => { quitting = true; app.quit(); } },
+  ]));
+}
+function createTray() {
+  try {
+    const img = nativeImage.createFromPath(path.join(__dirname, 'build', 'window-icon.png')).resize({ width: 18, height: 18 });
+    tray = new Tray(img); tray.on('click', () => openPath('')); updateTray();
+  } catch (_) { tray = null; }
+}
+
+
 function showOffline(reason, edit) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.loadFile(OFFLINE_FILE, { query: { target: SITE_URL, reason: reason || '', edit: edit ? '1' : '' } });
@@ -117,7 +282,7 @@ ipcMain.handle('qp:set-site-url', (event, raw) => {
   return { ok: true };
 });
 
-function createWindow() {
+function createWindow(startPath) {
   const state = loadWindowState();
   mainWindow = new BrowserWindow({
     width: state.width, height: state.height, x: state.x, y: state.y,
@@ -171,7 +336,7 @@ function createWindow() {
   win.on('close', () => saveWindowState(win));
   win.on('closed', () => { mainWindow = null; });
 
-  win.loadURL(SITE_URL);
+  win.loadURL(SITE_URL + (typeof startPath === 'string' ? startPath : ''));
 }
 
 // ── Menu ───────────────────────────────────────────────────────────────────
@@ -200,6 +365,12 @@ function buildMenu() {
       { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' },
       { role: 'togglefullscreen' },
       ...(DEBUG ? [{ type: 'separator' }, { role: 'toggleDevTools' }] : []) ] },
+    { label: 'Clips', submenu: [
+      { label: 'Record clips (only while Roblox is open)', type: 'checkbox', checked: clip.enabled, click: (i) => setClipEnabled(i.checked) },
+      { label: 'Save a clip now (' + CLIP_KEY_TEXT + ')', enabled: clip.enabled, click: onClipKey },
+      { label: 'Record game sound', type: 'checkbox', checked: clip.sound, enabled: process.platform === 'win32', click: (i) => setClipSound(i.checked) },
+      { type: 'separator' },
+      { label: 'My clips', click: () => openPath('/clips') } ] },
     { label: 'Window', submenu: [
       { role: 'minimize' }, { role: 'zoom' },
       ...(isMac ? [{ type: 'separator' }, { role: 'front' }] : [{ role: 'close' }]) ] },
@@ -219,7 +390,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();                              // already running -> the first window gets focus instead
 } else {
   app.on('second-instance', () => {
-    if (!mainWindow) return;
+    if (!mainWindow) { createWindow(); return; }
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show(); mainWindow.focus();
   });
@@ -232,8 +403,15 @@ if (!app.requestSingleInstanceLock()) {
       cb(['fullscreen', 'clipboard-sanitized-write'].includes(permission)));
     buildMenu();
     createWindow();
+    createTray();
+    pruneOldClips();
+    if (!globalShortcut.register(CLIP_KEY, onClipKey)) console.warn('Could not register the clip key');
+    pollTimer = setInterval(pollRoblox, 4000);
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   });
 
-  app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+  app.on('before-quit', () => { quitting = true; });
+  app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch (_) {} clearInterval(pollTimer); });
+  // With clip recording on, closing the window keeps QuickPanel running in the tray so the hotkey still works.
+  app.on('window-all-closed', () => { if (process.platform !== 'darwin' && (!clip.enabled || quitting)) app.quit(); });
 }
