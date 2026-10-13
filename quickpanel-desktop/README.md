@@ -28,7 +28,7 @@ remembers it.
 
 | Platform | Command | Output |
 |---|---|---|
-| macOS (run on a Mac) | `npm run dist:mac` | `dist/QuickPanel.dmg` (+ `QuickPanel.zip`) — one app for Apple Silicon and Intel |
+| macOS (run on a Mac) | `npm run dist:mac` | `dist/QuickPanel.dmg` — one app for Apple Silicon and Intel |
 | Windows | `npm run dist:win` | `dist/QuickPanel-Setup.exe` — one-click installer |
 
 Windows builds need no special tools when run on Windows. On a Mac or Linux machine the
@@ -60,3 +60,21 @@ explains how to get past it. Removing the warnings requires buying certificates
 
 - `QUICKPANEL_URL` — open this address instead of the saved one (handy for testing)
 - `QP_DEBUG=1` — adds View → Developer Tools
+
+## No Mac handy?
+
+Upload this folder to a GitHub repo together with `.github/workflows/build-mac.yml` (see the workflow file
+that came with it), then run it from the repo's Actions tab. GitHub builds the Mac app for you and attaches
+`QuickPanel.dmg` to a release.
+
+## Clips (new in 1.1.0)
+
+Turn on **Clips → Record clips** (or the tray icon). While Roblox is open the app keeps about the last
+45 seconds of the Roblox window in memory. Press **Ctrl+Shift+C** (Cmd+Shift+C on Mac) to save a clip:
+it uploads to your QuickPanel account and opens a notification to name it and make a public link.
+
+- Only the Roblox window is recorded, never the whole screen, and nothing is uploaded until you press the key.
+- Windows records game sound (it includes anything playing on the PC, such as voice chat); turn it off in the Clips menu.
+- macOS: allow QuickPanel under System Settings, Privacy & Security, Screen Recording. Sound is not recorded on Mac.
+- With recording on, closing the window keeps QuickPanel running in the tray so the key keeps working. Quit from the tray icon.
+- If you aren't signed in or the upload fails, the clip stays in `<user data>/clips` (kept 14 days).
