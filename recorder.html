@@ -1,0 +1,59 @@
+<!doctype html><html><head><meta charset="utf-8"><title>QuickPanel recorder</title></head><body>
+<script src="clip-ring.js"></script>
+<script>
+(function () {
+  let stream = null, ring = null, timer = null, busy = false, lastClip = 0;
+  const TAIL_MS = 2000, COOLDOWN_MS = 5000, MAX_BYTES = 95 * 1048576;
+  function pickType() {
+    const t = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4;codecs=avc1.640028', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+    for (const x of t) if (window.MediaRecorder && MediaRecorder.isTypeSupported(x)) return x;
+    return '';
+  }
+  function makeRecorder() {
+    const type = pickType();
+    const mr = new MediaRecorder(stream, Object.assign({ videoBitsPerSecond: 4000000, audioBitsPerSecond: 128000 }, type ? { mimeType: type } : {}));
+    const rec = { chunks: [], type: mr.mimeType || type || 'video/webm', startedAt: 0 };
+    mr.ondataavailable = (e) => { if (e.data && e.data.size) rec.chunks.push(e.data); };
+    rec.start = () => mr.start(1000);
+    rec.stop = () => { try { if (mr.state !== 'inactive') mr.stop(); } catch (_) {} rec.chunks = []; };
+    rec.requestData = () => { try { if (mr.state === 'recording') mr.requestData(); } catch (_) {} };
+    return rec;
+  }
+  // Called by the app (with a user gesture) when Roblox is open and clipping is on.
+  window.qpStart = async function (sound) {
+    if (stream) return true;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: !!sound });
+    } catch (e) { window.qpRec.status('error:' + (e && e.name || 'capture')); return false; }
+    stream.getVideoTracks()[0].addEventListener('ended', () => { window.qpStop(); window.qpRec.status('ended'); });
+    ring = new ClipBuffer({ makeRecorder });
+    ring.start(); timer = setInterval(() => ring && ring.tick(), 1000);
+    window.qpRec.status('recording'); return true;
+  };
+  window.qpStop = function () {
+    clearInterval(timer); timer = null;
+    if (ring) ring.stop(); ring = null;
+    if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null;
+  };
+  async function save() {
+    const now = Date.now();
+    if (!ring || busy || now - lastClip < COOLDOWN_MS) return;
+    busy = true; lastClip = now;
+    try {
+      window.qpRec.status('saving');
+      await new Promise((r) => setTimeout(r, TAIL_MS));          // keep the moment after the key press too
+      const slot = ring.pick();
+      if (!slot) { window.qpRec.status('toosoon'); return; }
+      slot.requestData(); await new Promise((r) => setTimeout(r, 400));
+      const blob = new Blob(slot.chunks.slice(), { type: slot.type });
+      if (blob.size < 2048) { window.qpRec.status('empty'); return; }
+      if (blob.size > MAX_BYTES) { window.qpRec.status('toobig'); return; }
+      const seconds = Math.round((Date.now() - slot.startedAt) / 1000);
+      await window.qpRec.sendClip(await blob.arrayBuffer(), { type: slot.type, seconds });
+    } catch (e) { window.qpRec.status('error:save'); }
+    finally { busy = false; }
+  }
+  window.qpRec.onSave(save);
+  window.qpRec.onStop(() => window.qpStop());
+})();
+</script></body></html>
