@@ -1,0 +1,45 @@
+name: Build Windows app
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the installer to (e.g. v1.1.0). The release must already exist."
+        required: true
+        default: "v1.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the app folder
+        id: find
+        shell: bash
+        run: |
+          dir=$(dirname "$(grep -rl --include=package.json '"productName": "QuickPanel"' . --exclude-dir=node_modules | head -n1)")
+          echo "App folder: $dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install
+        working-directory: ${{ steps.find.outputs.dir }}
+        run: npm ci
+
+      - name: Build Windows installer
+        working-directory: ${{ steps.find.outputs.dir }}
+        run: npm run dist:win
+
+      - name: Attach to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.inputs.tag }}" "${{ steps.find.outputs.dir }}/dist/QuickPanel-Setup.exe" --clobber --repo "${{ github.repository }}"
